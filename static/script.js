@@ -1,6 +1,9 @@
 // منطق JavaScript لتحليل السيرة الذاتية والتعامل مع API
 
-const API_URL = 'https://resume-ats-checker-82vc.onrender.com';
+// تحديد API URL تلقائياً حسب البيئة
+const API_URL = window.location.hostname === 'localhost' 
+    ? 'http://localhost:5000' 
+    : window.location.origin;
 
 // العناصر الرئيسية
 const uploadForm = document.getElementById('uploadForm');
