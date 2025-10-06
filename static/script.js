@@ -2,7 +2,7 @@
 
 // تغيير URL هذا إلى عنوان Backend الخاص بك على Render
 const API_URL = 'http://localhost:5000'; // للتجربة المحلية
-// const API_URL = 'https://your-app-name.onrender.com'; // للنشر على Render
+// const API_URL = 'https://resume-ats-checker-82vc.onrender.com'; // للنشر على Render
 
 // العناصر الرئيسية
 const uploadForm = document.getElementById('uploadForm');
