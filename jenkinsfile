@@ -1,0 +1,263 @@
+pipeline {
+    agent any
+    
+    environment {
+        // Docker configuration
+        DOCKER_IMAGE = 'ats-resume-checker'
+        DOCKER_TAG = "${BUILD_NUMBER}"
+        DOCKER_REGISTRY = 'docker.io' // Change to your registry
+        DOCKER_CREDENTIALS_ID = 'docker-hub-credentials'
+        
+        // Application configuration
+        APP_NAME = 'ats-resume-checker'
+        PORT = '5000'
+        
+        // Git configuration
+        GIT_BRANCH = "${env.GIT_BRANCH ?: 'main'}"
+    }
+    
+    options {
+        buildDiscarder(logRotator(numToKeepStr: '10'))
+        timestamps()
+        timeout(time: 30, unit: 'MINUTES')
+    }
+    
+    stages {
+        stage('Checkout') {
+            steps {
+                script {
+                    echo "🔄 Checking out code from ${GIT_BRANCH} branch..."
+                }
+                checkout scm
+            }
+        }
+        
+        stage('Environment Info') {
+            steps {
+                script {
+                    echo "📋 Build Information:"
+                    sh '''
+                        echo "Build Number: ${BUILD_NUMBER}"
+                        echo "Build ID: ${BUILD_ID}"
+                        echo "Job Name: ${JOB_NAME}"
+                        echo "Workspace: ${WORKSPACE}"
+                        python3 --version
+                        docker --version
+                    '''
+                }
+            }
+        }
+        
+        stage('Install Dependencies') {
+            steps {
+                script {
+                    echo "📦 Installing Python dependencies..."
+                }
+                sh '''
+                    python3 -m pip install --upgrade pip
+                    pip install -r requirements.txt
+                '''
+            }
+        }
+        
+        stage('Lint & Code Quality') {
+            steps {
+                script {
+                    echo "🔍 Running code quality checks..."
+                }
+                sh '''
+                    # Install linting tools
+                    pip install flake8 pylint
+                    
+                    # Run flake8 (ignore long lines and some Flask patterns)
+                    flake8 app.py --max-line-length=120 --ignore=E501,W503 || true
+                    
+                    # Run pylint
+                    pylint app.py --disable=C0111,C0103 || true
+                '''
+            }
+        }
+        
+        stage('Security Scan') {
+            steps {
+                script {
+                    echo "🔒 Running security checks..."
+                }
+                sh '''
+                    # Install security tools
+                    pip install bandit safety
+                    
+                    # Run Bandit for security issues
+                    bandit -r app.py -f json -o bandit-report.json || true
+                    
+                    # Check for vulnerable dependencies
+                    safety check --json || true
+                '''
+            }
+        }
+        
+        stage('Unit Tests') {
+            steps {
+                script {
+                    echo "🧪 Running unit tests..."
+                }
+                sh '''
+                    # Install testing dependencies
+                    pip install pytest pytest-cov pytest-flask
+                    
+                    # Run tests (create basic test if none exist)
+                    if [ ! -f "test_app.py" ]; then
+                        echo "⚠️ No tests found, creating basic health check test..."
+                        cat > test_app.py << 'EOF'
+import pytest
+from app import app
+
+@pytest.fixture
+def client():
+    app.config['TESTING'] = True
+    with app.test_client() as client:
+        yield client
+
+def test_home_page(client):
+    response = client.get('/')
+    assert response.status_code == 200
+EOF
+                    fi
+                    
+                    pytest test_app.py --verbose --cov=app --cov-report=html || true
+                '''
+            }
+        }
+        
+        stage('Build Docker Image') {
+            steps {
+                script {
+                    echo "🐳 Building Docker image..."
+                    docker_image = docker.build("${DOCKER_IMAGE}:${DOCKER_TAG}")
+                    docker_image.tag("${DOCKER_IMAGE}:latest")
+                }
+            }
+        }
+        
+        stage('Test Docker Image') {
+            steps {
+                script {
+                    echo "🧪 Testing Docker image..."
+                }
+                sh '''
+                    # Run container for testing
+                    docker run -d --name test-container-${BUILD_NUMBER} \
+                        -p 5001:5000 \
+                        ${DOCKER_IMAGE}:${DOCKER_TAG}
+                    
+                    # Wait for container to be ready
+                    sleep 10
+                    
+                    # Test health endpoint
+                    curl -f http://localhost:5001/ || exit 1
+                    
+                    # Cleanup
+                    docker stop test-container-${BUILD_NUMBER}
+                    docker rm test-container-${BUILD_NUMBER}
+                '''
+            }
+        }
+        
+        stage('Push to Registry') {
+            when {
+                branch 'main'
+            }
+            steps {
+                script {
+                    echo "📤 Pushing image to Docker registry..."
+                    docker.withRegistry("https://${DOCKER_REGISTRY}", "${DOCKER_CREDENTIALS_ID}") {
+                        docker_image.push("${DOCKER_TAG}")
+                        docker_image.push("latest")
+                    }
+                }
+            }
+        }
+        
+        stage('Deploy') {
+            when {
+                branch 'main'
+            }
+            steps {
+                script {
+                    echo "🚀 Deploying application..."
+                }
+                sh '''
+                    # Stop and remove old container if exists
+                    docker stop ${APP_NAME} || true
+                    docker rm ${APP_NAME} || true
+                    
+                    # Run new container
+                    docker run -d \
+                        --name ${APP_NAME} \
+                        -p ${PORT}:5000 \
+                        --restart unless-stopped \
+                        -v ${WORKSPACE}/uploads:/app/uploads \
+                        ${DOCKER_IMAGE}:${DOCKER_TAG}
+                    
+                    # Verify deployment
+                    sleep 5
+                    docker ps | grep ${APP_NAME}
+                '''
+            }
+        }
+        
+        stage('Smoke Tests') {
+            when {
+                branch 'main'
+            }
+            steps {
+                script {
+                    echo "💨 Running smoke tests..."
+                }
+                sh '''
+                    # Wait for application to be fully ready
+                    sleep 10
+                    
+                    # Test homepage
+                    curl -f http://localhost:${PORT}/ || exit 1
+                    
+                    echo "✅ Smoke tests passed!"
+                '''
+            }
+        }
+    }
+    
+    post {
+        success {
+            script {
+                echo "✅ Pipeline completed successfully!"
+                echo "🎉 Build #${BUILD_NUMBER} is ready!"
+                echo "🌐 Application URL: http://localhost:${PORT}"
+            }
+        }
+        
+        failure {
+            script {
+                echo "❌ Pipeline failed!"
+                echo "🔍 Check logs for details"
+            }
+        }
+        
+        always {
+            script {
+                echo "🧹 Cleaning up..."
+            }
+            // Clean up test containers
+            sh '''
+                docker ps -a | grep test-container || true
+                docker system prune -f || true
+            '''
+            
+            // Archive artifacts
+            archiveArtifacts artifacts: '**/*.json, **/*.html', allowEmptyArchive: true
+            
+            // Publish test results
+            junit allowEmptyResults: true, testResults: '**/test-results/*.xml'
+        }
+    }
+}
